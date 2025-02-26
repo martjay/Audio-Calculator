@@ -601,8 +601,8 @@ class BPMCalculator(QWidget):
         self.last_tap_time = now  # 记录最后一次点击时间
         self.taps.append(now)
         
-        # 保持最近5次点击记录
-        if len(self.taps) > 5:
+        # 保持最近20次点击记录
+        if len(self.taps) > 20:
             self.taps.pop(0)
             
         self.calculateBPM()
@@ -616,18 +616,25 @@ class BPMCalculator(QWidget):
         self.sync_timer.start(3000)  # 3秒后同步
             
     def calculateBPM(self):
-        if len(self.taps) < 2:
+        if len(self.taps) < 2:  # 至少需要2次点击才能开始计算
             self.bpmDisplay.setText('0 BPM')
             return None
             
+        # 计算所有相邻点击之间的时间间隔
         intervals = []
         for i in range(1, len(self.taps)):
             intervals.append(self.taps[i] - self.taps[i-1])
-            
-        avg_interval = sum(intervals) / len(intervals)
-        bpm = round(60000 / avg_interval)
         
-        self.bpmDisplay.setText(f'{bpm} BPM')
+        # 如果有超过20个间隔，只取最近20个
+        if len(intervals) > 20:
+            intervals = intervals[-20:]
+            
+        # 计算平均间隔
+        avg_interval = sum(intervals) / len(intervals)
+        bpm = round(60000 / avg_interval)  # 保持原有计算公式不变
+        
+        # 更新显示，添加当前使用的点击次数信息
+        self.bpmDisplay.setText(f'{bpm} BPM ({len(intervals)} taps)')
         return bpm
 
     def syncBPMToParent(self):
