@@ -645,7 +645,9 @@ class BPMCalculator(QWidget):
             self.sync_timer = QTimer()
             self.sync_timer.setSingleShot(True)
             self.sync_timer.timeout.connect(self.syncBPMToParent)
-            self.sync_timer.start(3000 - (current_time - self.last_tap_time))
+            # 将时间差值转换为整数
+            remaining_time = int(3000 - (current_time - self.last_tap_time))
+            self.sync_timer.start(max(0, remaining_time))  # 确保时间值不为负
 
     def resetBPM(self):
         """重置BPM显示和计数器"""
