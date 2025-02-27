@@ -4,9 +4,9 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                            QHBoxLayout, QLabel, QLineEdit, QPushButton, 
                            QTableWidget, QTableWidgetItem, QHeaderView,
                            QFrame, QGraphicsDropShadowEffect, QSizePolicy,
-                           QMessageBox, QToolTip)
-from PyQt6.QtCore import Qt, QPropertyAnimation, QEasingCurve, QPoint, QTimer
-from PyQt6.QtGui import QDoubleValidator, QColor, QPalette, QLinearGradient, QFont, QCursor, QIcon
+                           QMessageBox, QToolTip, QSystemTrayIcon, QMenu)
+from PyQt6.QtCore import Qt, QPropertyAnimation, QEasingCurve, QPoint, QTimer, QSize
+from PyQt6.QtGui import QDoubleValidator, QColor, QPalette, QLinearGradient, QFont, QCursor, QIcon, QAction
 from PyQt6.QtCore import QPropertyAnimation, QRect
 import pyperclip
 import os
@@ -75,7 +75,9 @@ class LanguageManager:
             'expand': '展开',
             'collapse': '收起',
             'hide_delay_params': '隐藏延迟参数',
-            'show_delay_params': '显示延迟参数'
+            'show_delay_params': '显示延迟参数',
+            'show': '显示',
+            'quit': '退出'
         },
         'en': {
             'window_title': 'Audio Calculator',
@@ -105,7 +107,9 @@ class LanguageManager:
             'expand': 'Expand',
             'collapse': 'Collapse',
             'hide_delay_params': 'Hide Delay Params',
-            'show_delay_params': 'Show Delay Params'
+            'show_delay_params': 'Show Delay Params',
+            'show': 'Show',
+            'quit': 'Quit'
         }
     }
 
@@ -698,8 +702,9 @@ class DelayParamsWindow(QMainWindow):
         self.parent = parent
         self.is_syncing = False
         self.is_animating = False
+        self.is_snapped = False  # 添加吸附状态标志
         self.current_theme = self.parent.current_theme if self.parent else ThemeManager.DARK_THEME
-        self.current_lang = self.parent.current_lang if self.parent else 'zh'  # 添加current_lang属性
+        self.current_lang = self.parent.current_lang if self.parent else 'zh'
         self.initUI()
         
     def initUI(self):
@@ -785,27 +790,33 @@ class DelayParamsWindow(QMainWindow):
             )
     
     def moveEvent(self, event):
-        """当延迟参数窗口移动时，更新主窗口位置"""
+        """当延迟参数窗口移动时，处理吸附效果"""
         super().moveEvent(event)
-        # 只有在窗口可见且不在动画过程中时才同步位置
-        if (self.parent and self.isVisible() and not self.is_syncing 
-            and not self.is_animating):
-            self.is_syncing = True
-            # 计算标题栏高度差异
-            frameGeometry = self.frameGeometry()
-            contentGeometry = self.geometry()
-            titleBarHeight = frameGeometry.height() - contentGeometry.height()
-            parentTitleBarHeight = self.parent.frameGeometry().height() - self.parent.geometry().height()
-            heightDiff = titleBarHeight - parentTitleBarHeight
+        
+        if not (self.parent and self.isVisible() and not self.is_animating):
+            return
             
-            # 更新主窗口位置，保持在延迟窗口左侧
-            self.parent.setGeometry(
-                self.x() - self.parent.width(),
-                self.y() + heightDiff,
-                self.parent.width(),
-                self.height() - heightDiff
-            )
-            QTimer.singleShot(100, lambda: setattr(self, 'is_syncing', False))
+        if self.is_syncing:
+            return
+            
+        try:
+            self.is_syncing = True
+            
+            # 获取当前延迟窗口位置
+            delay_pos = self.pos()
+            
+            # 计算主窗口应该在的位置(延迟窗口左侧)
+            parent_target_x = max(0, delay_pos.x() - self.parent.width())
+            
+            # 移动主窗口到目标位置,保持顶部对齐
+            self.parent.move(parent_target_x, delay_pos.y())
+            
+            # 保持两个窗口高度一致
+            if self.height() != self.parent.height():
+                self.resize(self.width(), self.parent.height())
+                
+        finally:
+            QTimer.singleShot(50, lambda: setattr(self, 'is_syncing', False))
 
     def updateTheme(self):
         """更新主题"""
@@ -830,7 +841,102 @@ class MainWindow(QMainWindow):
         self.slideAnimation = None  # 添加动画属性
         self.current_theme = ThemeManager.DARK_THEME  # 默认使用暗色主题
         self.current_lang = 'zh'  # 默认使用中文
+        
+        # 创建系统托盘图标
+        self.createTrayIcon()
+        
+        # 创建悬浮窗
+        self.floatingWindow = FloatingWindow(self)
+        self.floatingWindow.show()
+        
         self.initUI()
+        
+    def createTrayIcon(self):
+        # 创建托盘图标
+        self.trayIcon = QSystemTrayIcon(self)
+        icon_path = get_resource_path('icon.ico')
+        if os.path.exists(icon_path):
+            self.trayIcon.setIcon(QIcon(icon_path))
+        
+        # 创建托盘菜单
+        self.trayMenu = QMenu()
+        
+        # 添加显示/隐藏动作
+        self.showAction = QAction("显示", self)
+        self.showAction.triggered.connect(self.toggleAllWindows)
+        self.trayMenu.addAction(self.showAction)
+        
+        # 添加退出动作
+        self.quitAction = QAction("退出", self)
+        self.quitAction.triggered.connect(self.realQuit)
+        self.trayMenu.addAction(self.quitAction)
+        
+        # 设置托盘图标的菜单
+        self.trayIcon.setContextMenu(self.trayMenu)
+        
+        # 托盘图标单击事件
+        self.trayIcon.activated.connect(self.trayIconActivated)
+        
+        # 显示托盘图标
+        self.trayIcon.show()
+        
+    def toggleAllWindows(self):
+        if self.isVisible():
+            # 保存延迟窗口状态
+            self.delay_window_was_visible = self.delayWindow and self.delayWindow.isVisible()
+            # 隐藏所有窗口
+            if self.delayWindow and self.delayWindow.isVisible():
+                self.delayWindow.hide()
+            if self.bpmCalculator and self.bpmCalculator.isVisible():
+                self.bpmCalculator.hide()
+            self.hide()
+            # 更新托盘菜单文本
+            self.showAction.setText("显示" if self.current_lang == 'zh' else "Show")
+        else:
+            # 显示主窗口
+            self.showNormal()
+            self.activateWindow()
+            # 恢复延迟窗口状态
+            if hasattr(self, 'delay_window_was_visible') and self.delay_window_was_visible:
+                if self.delayWindow:
+                    self.delayWindow.show()
+                    self.delayWindow.updateGeometry()
+                else:
+                    self.toggleDelayWindow()
+            # 更新托盘菜单文本
+            self.showAction.setText("隐藏" if self.current_lang == 'zh' else "Hide")
+
+    def trayIconActivated(self, reason):
+        if reason == QSystemTrayIcon.ActivationReason.Trigger:  # 单击
+            self.toggleAllWindows()
+            
+    def closeEvent(self, event):
+        # 最小化到系统托盘而不是退出
+        if self.trayIcon.isVisible():
+            # 保存延迟窗口的状态
+            self.delay_window_was_visible = self.delayWindow and self.delayWindow.isVisible()
+            # 隐藏所有窗口
+            if self.delayWindow and self.delayWindow.isVisible():
+                self.delayWindow.hide()
+            if self.bpmCalculator and self.bpmCalculator.isVisible():
+                self.bpmCalculator.hide()
+            self.hide()
+            event.ignore()
+            
+    def realQuit(self):
+        # 真正退出程序
+        self.trayIcon.hide()
+        QApplication.quit()
+        
+    def showNormal(self):
+        # 显示主窗口
+        super().showNormal()
+        self.activateWindow()
+        # 恢复延迟窗口状态
+        if hasattr(self, 'delay_window_was_visible') and self.delay_window_was_visible:
+            if self.delayWindow:
+                self.delayWindow.show()
+                self.delayWindow.updateGeometry()
         
     def initUI(self):
         # 设置窗口图标
@@ -841,7 +947,7 @@ class MainWindow(QMainWindow):
             QApplication.setWindowIcon(QIcon(icon_path))
             
         self.setWindowTitle(LanguageManager.TRANSLATIONS[self.current_lang]['window_title'])
-        self.resize(620, 620)
+        self.resize(620, 580)
         
         # 主窗口部件
         mainWidget = QWidget()
@@ -997,6 +1103,10 @@ class MainWindow(QMainWindow):
         self.manualBpmButton.setText(texts['manual_bpm'])
         self.toggleDelayButton.setText(texts['show_delay'] if not self.delayWindow or self.delayWindow.isHidden() else texts['hide_delay'])
         
+        # 更新托盘菜单文本
+        self.showAction.setText("显示" if self.current_lang == 'zh' else "Show")
+        self.quitAction.setText("退出" if self.current_lang == 'zh' else "Quit")
+        
         # 更新标签和表头
         for widget in self.findChildren(QLabel):
             if widget.text() == LanguageManager.TRANSLATIONS['en']['bpm_label'] or widget.text() == LanguageManager.TRANSLATIONS['zh']['bpm_label']:
@@ -1083,20 +1193,30 @@ class MainWindow(QMainWindow):
             self.delayWindow.show()
             self.delayWindow.hide()
             
-            # 计算标题栏高度差异
-            frameGeometry = self.delayWindow.frameGeometry()
-            contentGeometry = self.delayWindow.geometry()
-            titleBarHeight = frameGeometry.height() - contentGeometry.height()
-            parentTitleBarHeight = self.frameGeometry().height() - self.geometry().height()
-            heightDiff = titleBarHeight - parentTitleBarHeight
+            # 获取屏幕尺寸
+            screen = QApplication.primaryScreen()
+            screen_geometry = screen.availableGeometry()
+            
+            # 获取主窗口的全局位置
+            parent_pos = self.mapToGlobal(QPoint(0, 0))
             
             # 设置动画起始和结束位置
             target_rect = QRect(
-                self.x() + self.width(),
-                self.y() - heightDiff,
+                parent_pos.x() + self.width(),  # 主窗口右边缘
+                parent_pos.y(),                 # 主窗口顶部
                 600,
-                self.height() + heightDiff
+                self.height()                   # 主窗口高度
             )
+            
+            # 检查是否超出屏幕边界
+            if target_rect.right() > screen_geometry.right():
+                # 如果超出右边界，将主窗口向左移动
+                new_x = screen_geometry.right() - (target_rect.width() + self.width())
+                new_pos = self.mapFromGlobal(QPoint(new_x, parent_pos.y()))
+                self.move(max(0, new_pos.x()), new_pos.y())
+                parent_pos = self.mapToGlobal(QPoint(0, 0))
+                target_rect.moveLeft(parent_pos.x() + self.width())
+            
             start_rect = QRect(
                 target_rect.x() + 600,
                 target_rect.y(),
@@ -1238,9 +1358,22 @@ class MainWindow(QMainWindow):
         """当主窗口移动时，更新延迟参数窗口位置"""
         super().moveEvent(event)
         if self.delayWindow and self.delayWindow.isVisible():
-            self.delayWindow.is_syncing = True
-            self.delayWindow.updateGeometry()
-            QTimer.singleShot(100, lambda: setattr(self.delayWindow, 'is_syncing', False))
+            if not self.delayWindow.is_syncing:
+                try:
+                    self.delayWindow.is_syncing = True
+                    
+                    # 获取主窗口位置
+                    parent_pos = self.pos()
+                    
+                    # 移动延迟窗口到主窗口右侧,保持顶部对齐
+                    self.delayWindow.move(parent_pos.x() + self.width(), parent_pos.y())
+                    
+                    # 保持两个窗口高度一致
+                    if self.delayWindow.height() != self.height():
+                        self.delayWindow.resize(self.delayWindow.width(), self.height())
+                        
+                finally:
+                    QTimer.singleShot(50, lambda: setattr(self.delayWindow, 'is_syncing', False))
 
     def resizeEvent(self, event):
         """当主窗口大小改变时，更新延迟参数窗口"""
@@ -1248,9 +1381,168 @@ class MainWindow(QMainWindow):
         if self.delayWindow and self.delayWindow.isVisible():
             self.delayWindow.updateGeometry()
 
+class FloatingWindow(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(None)  # 不设置父窗口
+        self.main_window = parent  # 保存主窗口引用
+        self.dragging = False
+        self.offset = None
+        self.windows_hidden = False
+        self.drag_threshold = QApplication.startDragDistance()
+        self.drag_started = False
+        self.press_pos = None
+        
+        # 设置窗口标志
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.Tool)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setFixedSize(100, 40)
+        
+        # 创建右键菜单
+        self.context_menu = QMenu(self)
+        self.show_action = QAction(LanguageManager.TRANSLATIONS[self.main_window.current_lang]['show'], self)
+        self.quit_action = QAction(LanguageManager.TRANSLATIONS[self.main_window.current_lang]['quit'], self)
+        self.context_menu.addAction(self.show_action)
+        self.context_menu.addAction(self.quit_action)
+        
+        # 连接菜单动作信号
+        self.show_action.triggered.connect(self.toggleMainWindow)
+        self.quit_action.triggered.connect(self.main_window.realQuit)
+        
+        self.initUI()
+        self.moveToDefaultPosition()
+
+    def toggleMainWindow(self):
+        if not self.main_window:
+            return
+            
+        if not self.windows_hidden:
+            # 保存延迟窗口状态
+            if hasattr(self.main_window, 'delayWindow'):
+                self.main_window.delay_window_was_visible = self.main_window.delayWindow and self.main_window.delayWindow.isVisible()
+            # 隐藏所有窗口
+            for window in QApplication.topLevelWidgets():
+                if window != self and window.isVisible():
+                    window.hide()
+            self.windows_hidden = True
+        else:
+            # 显示主窗口
+            if self.main_window.isMinimized():
+                self.main_window.showNormal()
+            else:
+                self.main_window.show()
+            self.main_window.activateWindow()
+            # 恢复延迟窗口状态
+            if hasattr(self.main_window, 'delay_window_was_visible') and self.main_window.delay_window_was_visible:
+                if self.main_window.delayWindow:
+                    self.main_window.delayWindow.show()
+                    self.main_window.delayWindow.updateGeometry()
+                else:
+                    self.main_window.toggleDelayWindow()
+            self.windows_hidden = False
+
+    def initUI(self):
+        # 创建布局
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        
+        # 创建标签
+        self.label = QLabel("音频计算器")
+        self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.updateStyle()
+        layout.addWidget(self.label)
+        
+        # 设置初始透明度
+        self.setWindowOpacity(0.9)
+
+    def updateStyle(self):
+        """更新样式，包括悬停和按下状态"""
+        base_style = """
+            QLabel {
+                background-color: %s;
+                color: #F5DEB3;
+                font-size: 14px;
+                padding: 10px;
+                border-radius: 10px;
+                border: 2px solid #F5DEB3;
+            }
+        """
+        
+        if self.dragging:
+            bg_color = "#1a2733"  # 更深的颜色
+        elif self.drag_started:
+            bg_color = "#34495e"  # 稍亮的颜色
+        else:
+            bg_color = "#2C3E50"  # 基础颜色
+            
+        self.label.setStyleSheet(base_style % bg_color)
+
+    def moveToDefaultPosition(self):
+        screen = QApplication.primaryScreen().geometry()
+        # 水平位置改为距离右边缘1/10宽度，垂直位置保持在1/5高度
+        self.move(screen.width() - self.width() - screen.width() // 10, screen.height() // 10)
+
+    def contextMenuEvent(self, event):
+        # 显示右键菜单
+        self.context_menu.popup(event.globalPos())
+        
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.press_pos = event.pos()
+            self.dragging = False
+            self.drag_started = False
+            
+    def mouseMoveEvent(self, event):
+        if not self.press_pos:
+            return
+            
+        # 计算移动距离
+        move_distance = (event.pos() - self.press_pos).manhattanLength()
+        
+        # 如果超过拖动阈值，开始拖动
+        if not self.drag_started and move_distance > self.drag_threshold:
+            self.drag_started = True
+            self.dragging = True
+            self.offset = event.pos()
+            
+        if self.dragging:
+            new_pos = event.globalPosition().toPoint() - self.offset
+            # 确保窗口不会移出屏幕
+            screen = QApplication.primaryScreen().geometry()
+            new_x = max(0, min(new_pos.x(), screen.width() - self.width()))
+            new_y = max(0, min(new_pos.y(), screen.height() - self.height()))
+            self.move(new_x, new_y)
+            
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            # 如果没有发生拖动，则触发toggleMainWindow
+            if not self.drag_started:
+                self.toggleMainWindow()
+            self.press_pos = None
+            self.dragging = False
+            self.drag_started = False
+            self.updateStyle()  # 更新样式
+            
+    def enterEvent(self, event):
+        self.setWindowOpacity(1.0)  # 鼠标进入时完全不透明
+        
+    def leaveEvent(self, event):
+        if not self.dragging:  # 只有在不拖动时才改变透明度
+            self.setWindowOpacity(0.9)  # 鼠标离开时恢复半透明
+
 def main():
     app = QApplication(sys.argv)
     app.setStyle('Fusion')  # 使用Fusion风格作为基础
+    
+    # 检查是否支持系统托盘
+    if not QSystemTrayIcon.isSystemTrayAvailable():
+        QMessageBox.critical(None, '系统托盘',
+                           '找不到系统托盘，程序无法运行。')
+        sys.exit(1)
+        
+    # 设置退出时不自动关闭
+    app.setQuitOnLastWindowClosed(False)
+    
     window = MainWindow()
     window.show()
     sys.exit(app.exec())
